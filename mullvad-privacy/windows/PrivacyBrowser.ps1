@@ -1,0 +1,135 @@
+param(
+    [string]$ConfigPath = "$PSScriptRoot\..\config\privacy-browser.json",
+    [switch]$DisableKillSwitch,
+    [switch]$RemoveKillSwitch
+)
+
+$ErrorActionPreference = "Stop"
+$RulePrefix = "PrivacyBrowser-KillSwitch"
+
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Remove-PrivacyFirewallRules {
+    Get-NetFirewallRule -DisplayName "$RulePrefix*" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+
+function Enable-PrivacyFirewallRules([string]$BrowserExe) {
+    if (-not (Test-Administrator)) {
+        throw "Administrator privileges are required to modify Windows Defender Firewall rules."
+    }
+    Remove-PrivacyFirewallRules
+    New-NetFirewallRule -DisplayName "$RulePrefix-IPv4-Low" -Direction Outbound -Action Block -Program $BrowserExe -RemoteAddress "0.0.0.0-126.255.255.255" -Profile Any | Out-Null
+    New-NetFirewallRule -DisplayName "$RulePrefix-IPv4-High" -Direction Outbound -Action Block -Program $BrowserExe -RemoteAddress "128.0.0.0-255.255.255.255" -Profile Any | Out-Null
+    New-NetFirewallRule -DisplayName "$RulePrefix-IPv6-All" -Direction Outbound -Action Block -Program $BrowserExe -RemoteAddress "::/0" -Profile Any | Out-Null
+}
+
+function Escape-JsString([string]$Value) {
+    if ($null -eq $Value) { return "" }
+    return $Value.Replace("\", "\\").Replace('"', '\"')
+}
+
+function Add-Pref([System.Collections.Generic.List[string]]$Lines, [string]$Name, $Value) {
+    if ($Value -is [bool]) {
+        $js = if ($Value) { "true" } else { "false" }
+    } elseif ($Value -is [int] -or $Value -is [long]) {
+        $js = [string]$Value
+    } else {
+        $js = '"' + (Escape-JsString ([string]$Value)) + '"'
+    }
+    $Lines.Add("user_pref(`"$Name`", $js);")
+}
+
+if ($RemoveKillSwitch) {
+    if (-not (Test-Administrator)) {
+        throw "Administrator privileges are required to remove Windows Defender Firewall rules."
+    }
+    Remove-PrivacyFirewallRules
+    Write-Host "Privacy Browser firewall rules removed."
+    exit 0
+}
+
+if (-not (Test-Path -LiteralPath $ConfigPath)) {
+    throw "Config not found: $ConfigPath. Copy privacy-browser.example.json to privacy-browser.json and edit it."
+}
+
+$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+$browserExe = [IO.Path]::GetFullPath([string]$config.BrowserExe)
+$profileDir = [IO.Path]::GetFullPath([string]$config.ProfileDir)
+
+if (-not (Test-Path -LiteralPath $browserExe)) {
+    throw "Browser executable not found: $browserExe"
+}
+New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+
+if ($config.SetSystemTimeZone) {
+    if (-not (Test-Administrator)) {
+        throw "Administrator privileges are required to change the Windows system timezone."
+    }
+    & tzutil.exe /s ([string]$config.SystemTimeZone)
+    if ($LASTEXITCODE -ne 0) {
+        throw "tzutil failed. Use 'tzutil /l' to list valid Windows timezone IDs."
+    }
+}
+
+$prefs = New-Object 'System.Collections.Generic.List[string]'
+Add-Pref $prefs "network.proxy.type" 1
+Add-Pref $prefs "network.proxy.socks" ([string]$config.SocksHost)
+Add-Pref $prefs "network.proxy.socks_port" ([int]$config.SocksPort)
+Add-Pref $prefs "network.proxy.socks_version" 5
+Add-Pref $prefs "network.proxy.socks5_remote_dns" $true
+Add-Pref $prefs "network.proxy.no_proxies_on" ""
+Add-Pref $prefs "network.proxy.failover_direct" $false
+Add-Pref $prefs "network.proxy.allow_bypass" $false
+Add-Pref $prefs "network.trr.mode" 5
+Add-Pref $prefs "network.trr.uri" ""
+Add-Pref $prefs "media.peerconnection.enabled" $false
+Add-Pref $prefs "media.navigator.enabled" $false
+Add-Pref $prefs "network.http.http3.enable" $false
+Add-Pref $prefs "network.webtransport.enabled" $false
+Add-Pref $prefs "network.lna.enabled" $true
+Add-Pref $prefs "network.lna.blocking" $true
+Add-Pref $prefs "network.lna.allow_top_level_navigation" $false
+Add-Pref $prefs "network.lna.websocket.enabled" $true
+Add-Pref $prefs "network.lna.local-network-to-localhost.skip-checks" $false
+Add-Pref $prefs "geo.enabled" $false
+Add-Pref $prefs "dom.netinfo.enabled" $false
+Add-Pref $prefs "device.sensors.enabled" $false
+Add-Pref $prefs "dom.gamepad.enabled" $false
+Add-Pref $prefs "dom.battery.enabled" $false
+Add-Pref $prefs "privacy.identity.timezone_override" ([string]$config.BrowserTimeZone)
+Add-Pref $prefs "privacy.identity.useragent_override" ([string]$config.UserAgentOverride)
+Add-Pref $prefs "privacy.identity.platform_override" ([string]$config.PlatformOverride)
+Add-Pref $prefs "privacy.identity.oscpu_override" ([string]$config.OscpuOverride)
+Add-Pref $prefs "privacy.identity.appversion_override" ([string]$config.AppVersionOverride)
+Add-Pref $prefs "privacy.identity.buildid_override" ([string]$config.BuildIdOverride)
+
+if ($config.NoReferrer) {
+    Add-Pref $prefs "network.http.sendRefererHeader" 0
+    Add-Pref $prefs "network.http.referer.defaultPolicy" 0
+    Add-Pref $prefs "network.http.referer.defaultPolicy.pbmode" 0
+} else {
+    Add-Pref $prefs "network.http.referer.defaultPolicy" 2
+    Add-Pref $prefs "network.http.referer.defaultPolicy.pbmode" 2
+    Add-Pref $prefs "network.http.referer.XOriginTrimmingPolicy" 2
+}
+
+$userJs = Join-Path $profileDir "user.js"
+$prefs | Set-Content -LiteralPath $userJs -Encoding UTF8
+
+if ($config.KillSwitch -and -not $DisableKillSwitch) {
+    Enable-PrivacyFirewallRules $browserExe
+}
+
+Write-Host "Profile written: $userJs"
+Write-Host "SOCKS5 endpoint: $($config.SocksHost):$($config.SocksPort)"
+if ($config.KillSwitch -and -not $DisableKillSwitch) {
+    Write-Host "Kill switch: ON (browser can only reach IPv4 loopback; IPv6 is blocked)"
+} else {
+    Write-Host "Kill switch: OFF"
+}
+
+Start-Process -FilePath $browserExe -ArgumentList @("-profile", $profileDir, "-no-remote")
