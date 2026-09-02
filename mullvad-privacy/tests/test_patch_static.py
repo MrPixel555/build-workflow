@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 REQUIRED_PREFS = {
-    'pref("network.proxy.type", 1);',
+    'pref("privacy.network.fail_closed", true, locked);',
+    'pref("network.proxy.type", 1, locked);',
     'pref("network.proxy.socks", "127.0.0.1");',
     'pref("network.proxy.socks5_remote_dns", true);',
     'pref("network.proxy.failover_direct", false, locked);',
@@ -40,6 +41,13 @@ def main() -> None:
     profile = (root / "browser/app/profile/000-mullvad-browser.js").read_text(encoding="utf-8")
     for pref in sorted(REQUIRED_PREFS):
         require(profile, pref, "strict preference")
+
+    proxy = (root / "netwerk/base/nsProtocolProxyService.cpp").read_text(encoding="utf-8")
+    require(proxy, 'Preferences::GetBool("privacy.network.fail_closed", false)', "fail-closed preference")
+    require(proxy, 'IsStrictLoopbackHost(proxy->Host())', "callback loopback proxy enforcement")
+    require(proxy, 'NS_ERROR_PROXY_CONNECTION_REFUSED', "direct connection rejection")
+    require(proxy, 'strictDirectAllowed ? NS_OK : NS_ERROR_PROXY_CONNECTION_REFUSED', "direct-mode fail closed")
+    require(proxy, 'strictFailClosed && !IsStrictLoopbackHost(*host)', "manual proxy loopback enforcement")
 
     rfp = (root / "toolkit/components/resistfingerprinting/nsRFPService.cpp").read_text(encoding="utf-8")
     require(rfp, '"privacy.identity.useragent_override"', "RFP UA override")
