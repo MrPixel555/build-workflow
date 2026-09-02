@@ -43,6 +43,28 @@ function Add-Pref([System.Collections.Generic.List[string]]$Lines, [string]$Name
     $Lines.Add("user_pref(`"$Name`", $js);")
 }
 
+function Assert-LoopbackHost([string]$HostName) {
+    $normalized = $HostName.Trim().ToLowerInvariant()
+    if ($normalized -notin @("127.0.0.1", "localhost", "::1")) {
+        throw "Strict mode requires a loopback SOCKS endpoint: 127.0.0.1, localhost, or ::1."
+    }
+}
+
+function Get-CoherentUserAgent([string]$Version, [string]$ExplicitUserAgent) {
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitUserAgent)) {
+        return $ExplicitUserAgent.Trim()
+    }
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return ""
+    }
+    $trimmed = $Version.Trim()
+    if ($trimmed -notmatch '^\d{2,3}(?:\.\d+){0,3}$') {
+        throw "BrowserVersion must contain only a Firefox-style numeric version, for example 153 or 153.1.0."
+    }
+    $major = $trimmed.Split('.')[0]
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:$major.0) Gecko/20100101 Firefox/$major.0"
+}
+
 if ($RemoveKillSwitch) {
     if (-not (Test-Administrator)) {
         throw "Administrator privileges are required to remove Windows Defender Firewall rules."
@@ -59,9 +81,13 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $browserExe = [IO.Path]::GetFullPath([string]$config.BrowserExe)
 $profileDir = [IO.Path]::GetFullPath([string]$config.ProfileDir)
+Assert-LoopbackHost ([string]$config.SocksHost)
 
 if (-not (Test-Path -LiteralPath $browserExe)) {
     throw "Browser executable not found: $browserExe"
+}
+if ([int]$config.SocksPort -lt 1 -or [int]$config.SocksPort -gt 65535) {
+    throw "SocksPort must be between 1 and 65535."
 }
 New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
 
@@ -75,6 +101,8 @@ if ($config.SetSystemTimeZone) {
     }
 }
 
+$userAgent = Get-CoherentUserAgent ([string]$config.BrowserVersion) ([string]$config.UserAgentOverride)
+
 $prefs = New-Object 'System.Collections.Generic.List[string]'
 Add-Pref $prefs "network.proxy.type" 1
 Add-Pref $prefs "network.proxy.socks" ([string]$config.SocksHost)
@@ -86,9 +114,12 @@ Add-Pref $prefs "network.proxy.failover_direct" $false
 Add-Pref $prefs "network.proxy.allow_bypass" $false
 Add-Pref $prefs "network.trr.mode" 5
 Add-Pref $prefs "network.trr.uri" ""
+Add-Pref $prefs "network.trr.default_provider_uri" ""
+Add-Pref $prefs "network.trr.custom_uri" ""
 Add-Pref $prefs "media.peerconnection.enabled" $false
 Add-Pref $prefs "media.navigator.enabled" $false
 Add-Pref $prefs "network.http.http3.enable" $false
+Add-Pref $prefs "network.http.http3.enable_0rtt" $false
 Add-Pref $prefs "network.webtransport.enabled" $false
 Add-Pref $prefs "network.lna.enabled" $true
 Add-Pref $prefs "network.lna.blocking" $true
@@ -101,7 +132,7 @@ Add-Pref $prefs "device.sensors.enabled" $false
 Add-Pref $prefs "dom.gamepad.enabled" $false
 Add-Pref $prefs "dom.battery.enabled" $false
 Add-Pref $prefs "privacy.identity.timezone_override" ([string]$config.BrowserTimeZone)
-Add-Pref $prefs "privacy.identity.useragent_override" ([string]$config.UserAgentOverride)
+Add-Pref $prefs "privacy.identity.useragent_override" $userAgent
 Add-Pref $prefs "privacy.identity.platform_override" ([string]$config.PlatformOverride)
 Add-Pref $prefs "privacy.identity.oscpu_override" ([string]$config.OscpuOverride)
 Add-Pref $prefs "privacy.identity.appversion_override" ([string]$config.AppVersionOverride)
