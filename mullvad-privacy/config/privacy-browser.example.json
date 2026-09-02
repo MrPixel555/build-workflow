@@ -7,6 +7,7 @@
   "SetSystemTimeZone": false,
   "SystemTimeZone": "West Asia Standard Time",
   "BrowserTimeZone": "",
+  "BrowserVersion": "",
   "UserAgentOverride": "",
   "PlatformOverride": "",
   "OscpuOverride": "",
