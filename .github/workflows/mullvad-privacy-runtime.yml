@@ -1,0 +1,169 @@
+name: Mullvad Privacy Browser Windows Runtime
+
+on:
+  workflow_run:
+    workflows: [ "Mullvad Privacy Browser Windows Build" ]
+    types: [ completed ]
+  workflow_dispatch:
+
+jobs:
+  runtime-leak-test:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout privacy test tools
+        uses: actions/checkout@v4
+        with:
+          ref: mullvad-privacy-browser-v1
+
+      - name: Download Windows build artifact
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: privacy-browser-windows-x86_64
+          path: build-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Locate or extract browser executable
+        id: browser
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path unpacked -Force | Out-Null
+          Get-ChildItem build-artifact -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Extension -in @('.zip', '.exe')) {
+              $dest = Join-Path (Resolve-Path unpacked) ([IO.Path]::GetFileNameWithoutExtension($_.Name))
+              New-Item -ItemType Directory -Path $dest -Force | Out-Null
+              & 7z x -y "-o$dest" $_.FullName | Out-Null
+            }
+          }
+          $candidate = Get-ChildItem unpacked,build-artifact -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name.ToLowerInvariant() -in @('privacybrowser.exe','mullvadbrowser.exe','firefox.exe') -and
+              $_.FullName -notmatch '\\updater\\|uninstall|helper'
+            } |
+            Select-Object -First 1
+          if (-not $candidate) { throw 'Could not locate a runnable browser executable in the build artifact.' }
+          Write-Host "Browser executable: $($candidate.FullName)"
+          "path=$($candidate.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "name=$([IO.Path]::GetFileNameWithoutExtension($candidate.Name))" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Create CI runtime configuration
+        shell: pwsh
+        run: |
+          $config = [ordered]@{
+            BrowserExe = '${{ steps.browser.outputs.path }}'
+            ProfileDir = "$env:RUNNER_TEMP\privacy-profile"
+            SocksHost = '127.0.0.1'
+            SocksPort = 10808
+            KillSwitch = $true
+            SetSystemTimeZone = $false
+            SystemTimeZone = 'West Asia Standard Time'
+            BrowserTimeZone = ''
+            BrowserVersion = ''
+            UserAgentOverride = ''
+            PlatformOverride = ''
+            OscpuOverride = ''
+            AppVersionOverride = ''
+            BuildIdOverride = ''
+            NoReferrer = $true
+          }
+          $config | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP\privacy-ci.json" -Encoding utf8
+
+      - name: Start local SOCKS5 relay
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP\socks.log"
+          $process = Start-Process python -ArgumentList @(
+            'mullvad-privacy/tests/socks5_proxy.py', '--host', '127.0.0.1', '--port', '10808', '--log', $log
+          ) -PassThru
+          $process.Id | Set-Content "$env:RUNNER_TEMP\socks.pid"
+          for ($i = 0; $i -lt 30; $i++) {
+            if (Test-NetConnection 127.0.0.1 -Port 10808 -InformationLevel Quiet -WarningAction SilentlyContinue) { exit 0 }
+            Start-Sleep -Milliseconds 500
+          }
+          throw 'SOCKS5 relay did not start.'
+
+      - name: Configure browser and install OS kill switch
+        shell: pwsh
+        run: |
+          & mullvad-privacy/windows/PrivacyBrowser.ps1 -ConfigPath "$env:RUNNER_TEMP\privacy-ci.json"
+          Start-Sleep -Seconds 3
+          Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Tunnel-up browser test
+        shell: pwsh
+        run: |
+          $browser = '${{ steps.browser.outputs.path }}'
+          $profile = "$env:RUNNER_TEMP\privacy-profile"
+          $shot = "$env:RUNNER_TEMP\tunnel-up.png"
+          $proc = Start-Process $browser -ArgumentList @('-headless','-profile',$profile,'-no-remote','--screenshot',$shot,'https://example.com/') -PassThru
+          if (-not $proc.WaitForExit(90000)) { $proc.Kill(); throw 'Browser tunnel-up test timed out.' }
+          if (-not (Test-Path $shot)) { throw 'Browser did not create tunnel-up screenshot.' }
+          $log = Get-Content "$env:RUNNER_TEMP\socks.log" -Raw
+          if ($log -notmatch 'example\.com:443') { throw "Browser did not request example.com through the SOCKS relay. Log: $log" }
+          Write-Host 'PASS: HTTPS request traversed the local SOCKS5 relay.'
+
+      - name: Verify no direct browser TCP peer with kill switch enabled
+        shell: pwsh
+        run: |
+          $browser = '${{ steps.browser.outputs.path }}'
+          $profile = "$env:RUNNER_TEMP\privacy-profile"
+          $proc = Start-Process $browser -ArgumentList @('-headless','-profile',$profile,'-no-remote','https://example.com/') -PassThru
+          Start-Sleep -Seconds 5
+          $pids = @(Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue).Id
+          $bad = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+            $_.OwningProcess -in $pids -and $_.State -notin @('Listen','Bound','Closed') -and
+            $_.RemoteAddress -notlike '127.*' -and $_.RemoteAddress -ne '::1'
+          })
+          Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($bad.Count) { $bad | Format-Table | Out-String | Write-Error; throw 'Direct non-loopback browser TCP peer detected.' }
+          Write-Host 'PASS: no direct non-loopback browser TCP peer observed.'
+
+      - name: Stop tunnel and verify fail-closed with firewall
+        shell: pwsh
+        run: |
+          $socksPid = [int](Get-Content "$env:RUNNER_TEMP\socks.pid")
+          Stop-Process -Id $socksPid -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 1
+          if (Test-NetConnection 127.0.0.1 -Port 10808 -InformationLevel Quiet -WarningAction SilentlyContinue) { throw 'SOCKS relay is still listening.' }
+          $browser = '${{ steps.browser.outputs.path }}'
+          $profile = "$env:RUNNER_TEMP\privacy-profile"
+          Start-Process $browser -ArgumentList @('-headless','-profile',$profile,'-no-remote','https://example.com/') | Out-Null
+          Start-Sleep -Seconds 5
+          $pids = @(Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue).Id
+          $bad = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+            $_.OwningProcess -in $pids -and $_.State -notin @('Listen','Bound','Closed') -and
+            $_.RemoteAddress -notlike '127.*' -and $_.RemoteAddress -ne '::1'
+          })
+          Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($bad.Count) { $bad | Format-Table | Out-String | Write-Error; throw 'Leak detected after tunnel loss with firewall enabled.' }
+          Write-Host 'PASS: tunnel loss produced no direct connection with OS kill switch enabled.'
+
+      - name: Verify Gecko fail-closed without firewall fallback
+        shell: pwsh
+        run: |
+          Get-NetFirewallRule -DisplayName 'PrivacyBrowser-KillSwitch*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          $browser = '${{ steps.browser.outputs.path }}'
+          $profile = "$env:RUNNER_TEMP\privacy-profile"
+          Start-Process $browser -ArgumentList @('-headless','-profile',$profile,'-no-remote','https://example.com/') | Out-Null
+          Start-Sleep -Seconds 5
+          $pids = @(Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue).Id
+          $bad = @(Get-NetTCPConnection -ErrorAction SilentlyContinue | Where-Object {
+            $_.OwningProcess -in $pids -and $_.State -notin @('Listen','Bound','Closed') -and
+            $_.RemoteAddress -notlike '127.*' -and $_.RemoteAddress -ne '::1'
+          })
+          Get-Process '${{ steps.browser.outputs.name }}' -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($bad.Count) { $bad | Format-Table | Out-String | Write-Error; throw 'Gecko fail-closed bypass detected with OS firewall removed.' }
+          Write-Host 'PASS: Gecko fail-closed prevented direct fallback independently of the OS firewall.'
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-runtime-evidence
+          path: |
+            ${{ runner.temp }}/socks.log
+            ${{ runner.temp }}/tunnel-up.png
