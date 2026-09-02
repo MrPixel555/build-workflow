@@ -46,7 +46,9 @@ jobs:
       - name: Verify Python syntax
         run: |
           python -m py_compile mullvad-privacy/tools/apply_privacy_patch.py
+          python -m py_compile mullvad-privacy/tools/prepare_tor_build.py
           python -m py_compile mullvad-privacy/tests/test_patch_static.py
+          python -m py_compile mullvad-privacy/tests/socks5_proxy.py
 
       - name: Verify deterministic result
         shell: bash
@@ -94,7 +96,7 @@ jobs:
         shell: pwsh
         run: |
           $config = Get-Content mullvad-privacy/config/privacy-browser.example.json -Raw | ConvertFrom-Json
-          if ($config.SocksHost -ne '127.0.0.1') { throw 'default SOCKS host must be loopback' }
+          if ($config.SocksHost -ne '127.0.0.1') { throw 'default SOCKS host must be exactly 127.0.0.1' }
           if (-not $config.KillSwitch) { throw 'kill switch must be enabled by default' }
           if ($config.BrowserTimeZone -ne '') { throw 'browser timezone override must default to empty' }
           if ($config.BrowserVersion -ne '') { throw 'browser version override must default to empty' }
