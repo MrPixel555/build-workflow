@@ -69,7 +69,9 @@ $y += 42
 
 Add-TextField "BrowserExe" "Browser executable" ([string]$config.BrowserExe)
 Add-TextField "ProfileDir" "Profile directory" ([string]$config.ProfileDir)
-Add-TextField "SocksHost" "SOCKS host (loopback only)" ([string]$config.SocksHost)
+Add-TextField "SocksHost" "SOCKS host (strict: 127.0.0.1)" ([string]$config.SocksHost)
+$controls.SocksHost.ReadOnly = $true
+$controls.SocksHost.Text = "127.0.0.1"
 Add-TextField "SocksPort" "SOCKS port" ([string]$config.SocksPort)
 Add-CheckBox "KillSwitch" "Enable Windows firewall kill switch" ([bool]$config.KillSwitch)
 
@@ -137,15 +139,11 @@ function Save-Config {
     if (-not [int]::TryParse($controls.SocksPort.Text, [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
         throw "SOCKS port must be between 1 and 65535."
     }
-    $hostValue = $controls.SocksHost.Text.Trim().ToLowerInvariant()
-    if ($hostValue -notin @("127.0.0.1", "localhost", "::1")) {
-        throw "SOCKS host must be 127.0.0.1, localhost, or ::1."
-    }
 
     $obj = [ordered]@{
         BrowserExe = $controls.BrowserExe.Text.Trim()
         ProfileDir = $controls.ProfileDir.Text.Trim()
-        SocksHost = $hostValue
+        SocksHost = "127.0.0.1"
         SocksPort = $port
         KillSwitch = $controls.KillSwitch.Checked
         SetSystemTimeZone = $controls.SetSystemTimeZone.Checked
