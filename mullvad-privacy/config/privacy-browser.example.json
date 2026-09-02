@@ -1,0 +1,16 @@
+{
+  "BrowserExe": "C:\\PrivacyBrowser\\Browser\\privacybrowser.exe",
+  "ProfileDir": "C:\\PrivacyBrowser\\Data\\profile",
+  "SocksHost": "127.0.0.1",
+  "SocksPort": 10808,
+  "KillSwitch": true,
+  "SetSystemTimeZone": false,
+  "SystemTimeZone": "West Asia Standard Time",
+  "BrowserTimeZone": "",
+  "UserAgentOverride": "",
+  "PlatformOverride": "",
+  "OscpuOverride": "",
+  "AppVersionOverride": "",
+  "BuildIdOverride": "",
+  "NoReferrer": true
+}
