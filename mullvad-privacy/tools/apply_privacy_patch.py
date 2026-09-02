@@ -26,8 +26,8 @@ def append_once(path: Path, marker: str, content: str) -> None:
 
 def patch_profile(root: Path) -> None:
     path = root / "browser/app/profile/000-mullvad-browser.js"
-    block = r'''// Privacy Browser strict networking and data-minimization defaults.
-pref("network.proxy.type", 1);
+    block = r'''pref("privacy.network.fail_closed", true, locked);
+pref("network.proxy.type", 1, locked);
 pref("network.proxy.socks", "127.0.0.1");
 pref("network.proxy.socks_port", 10808);
 pref("network.proxy.socks_version", 5);
@@ -37,27 +37,23 @@ pref("network.proxy.share_proxy_settings", true);
 pref("network.proxy.failover_direct", false, locked);
 pref("network.proxy.allow_bypass", false, locked);
 
-// Do not create a second DNS path outside the configured SOCKS5 tunnel.
 pref("network.trr.mode", 5);
 pref("network.trr.uri", "");
 pref("network.trr.default_provider_uri", "");
 pref("network.trr.custom_uri", "");
 
-// Disable UDP-oriented browser transports in strict mode.
 pref("media.peerconnection.enabled", false);
 pref("media.navigator.enabled", false);
 pref("network.http.http3.enable", false);
 pref("network.http.http3.enable_0rtt", false);
 pref("network.webtransport.enabled", false);
 
-// Prevent public pages from probing local services or LAN topology.
 pref("network.lna.enabled", true);
 pref("network.lna.blocking", true);
 pref("network.lna.allow_top_level_navigation", false);
 pref("network.lna.websocket.enabled", true);
 pref("network.lna.local-network-to-localhost.skip-checks", false);
 
-// Explicitly keep location/network/device surfaces closed in the strict profile.
 pref("geo.enabled", false, locked);
 pref("dom.netinfo.enabled", false, locked);
 pref("dom.webmidi.enabled", false, locked);
@@ -68,14 +64,12 @@ pref("device.sensors.enabled", false);
 pref("dom.gamepad.enabled", false);
 pref("dom.battery.enabled", false);
 
-// Minimize navigation-origin disclosure. This is intentionally stricter than Mullvad defaults.
 pref("network.http.sendRefererHeader", 0);
 pref("network.http.referer.defaultPolicy", 0);
 pref("network.http.referer.defaultPolicy.pbmode", 0);
 pref("network.http.referer.XOriginPolicy", 2);
 pref("network.http.referer.XOriginTrimmingPolicy", 2);
 
-// Keep the anonymity-set defaults unless the user explicitly provides coherent overrides.
 pref("privacy.identity.timezone_override", "");
 pref("privacy.identity.useragent_override", "");
 pref("privacy.identity.platform_override", "");
@@ -83,7 +77,45 @@ pref("privacy.identity.oscpu_override", "");
 pref("privacy.identity.appversion_override", "");
 pref("privacy.identity.buildid_override", "");
 '''
-    append_once(path, "privacy.identity.timezone_override", block)
+    append_once(path, "privacy.network.fail_closed", block)
+
+
+def patch_proxy_core(root: Path) -> None:
+    path = root / "netwerk/base/nsProtocolProxyService.cpp"
+
+    replace_once(
+        path,
+        '#include "mozilla/Logging.h"\n#include "mozilla/ScopeExit.h"\n',
+        '#include "mozilla/Logging.h"\n#include "mozilla/Preferences.h"\n#include "mozilla/ScopeExit.h"\n',
+    )
+
+    old = '''  proxyURI.forget(aOut);\n  return NS_OK;\n}\n\n//-----------------------------------------------------------------------------\n'''
+    new = '''  proxyURI.forget(aOut);\n  return NS_OK;\n}\n\nstatic bool StrictFailClosedEnabled() {\n  return Preferences::GetBool("privacy.network.fail_closed", false);\n}\n\nstatic bool IsStrictLoopbackHost(const nsACString& aHost) {\n  return aHost.EqualsLiteral("127.0.0.1") || aHost.EqualsLiteral("::1") ||\n         aHost.LowerCaseEqualsLiteral("localhost");\n}\n\nstatic bool StrictDirectAllowed(nsIURI* aURI) {\n  nsAutoCString host;\n  if (NS_FAILED(aURI->GetAsciiHost(host)) || host.IsEmpty()) {\n    return true;\n  }\n  return IsStrictLoopbackHost(host);\n}\n\n//-----------------------------------------------------------------------------\n'''
+    replace_once(path, old, new)
+
+    old = '''  if (aProxyInfo && channelURI) {\n    nsProtocolInfo info;\n    rv = aService->GetProtocolInfo(channelURI, &info);\n\n    if (NS_SUCCEEDED(rv) &&\n        !aService->CanUseProxy(channelURI, info.defaultPort)) {\n      aProxyInfo = nullptr;\n    }\n  }\n\n  aCallback->OnProxyAvailable(aRequest, aChannel, aProxyInfo, aStatus);\n'''
+    new = '''  if (aProxyInfo && channelURI) {\n    nsProtocolInfo info;\n    rv = aService->GetProtocolInfo(channelURI, &info);\n\n    if (NS_SUCCEEDED(rv) &&\n        !aService->CanUseProxy(channelURI, info.defaultPort)) {\n      aProxyInfo = nullptr;\n    }\n  }\n\n  if (StrictFailClosedEnabled() && channelURI &&\n      !StrictDirectAllowed(channelURI)) {\n    nsCOMPtr<nsProxyInfo> proxy = do_QueryInterface(aProxyInfo);\n    if (!proxy || proxy->IsDirect() || !IsStrictLoopbackHost(proxy->Host())) {\n      aProxyInfo = nullptr;\n      aStatus = NS_ERROR_PROXY_CONNECTION_REFUSED;\n    }\n  }\n\n  aCallback->OnProxyAvailable(aRequest, aChannel, aProxyInfo, aStatus);\n'''
+    replace_once(path, old, new)
+
+    old = '''  nsCOMPtr<nsIURI> uri;\n  nsresult rv = GetProxyURI(channel, getter_AddRefs(uri));\n  if (NS_FAILED(rv)) return rv;\n\n  // See bug #586908.\n'''
+    new = '''  nsCOMPtr<nsIURI> uri;\n  nsresult rv = GetProxyURI(channel, getter_AddRefs(uri));\n  if (NS_FAILED(rv)) return rv;\n\n  const bool strictFailClosed = StrictFailClosedEnabled();\n  const bool strictDirectAllowed =\n      !strictFailClosed || StrictDirectAllowed(uri);\n\n  // See bug #586908.\n'''
+    replace_once(path, old, new)
+
+    old = '''  if ((mProxyConfig == PROXYCONFIG_DIRECT) ||\n      !CanUseProxy(uri, info.defaultPort)) {\n    return NS_OK;\n  }\n'''
+    new = '''  if ((mProxyConfig == PROXYCONFIG_DIRECT) ||\n      !CanUseProxy(uri, info.defaultPort)) {\n    return strictDirectAllowed ? NS_OK : NS_ERROR_PROXY_CONNECTION_REFUSED;\n  }\n'''
+    replace_once(path, old, new)
+
+    old = '''  if (mProxyConfig == PROXYCONFIG_DIRECT ||\n      (mProxyConfig == PROXYCONFIG_MANUAL &&\n       !CanUseProxy(uri, info.defaultPort))) {\n    return NS_OK;\n  }\n'''
+    new = '''  if (mProxyConfig == PROXYCONFIG_DIRECT ||\n      (mProxyConfig == PROXYCONFIG_MANUAL &&\n       !CanUseProxy(uri, info.defaultPort))) {\n    return strictDirectAllowed ? NS_OK : NS_ERROR_PROXY_CONNECTION_REFUSED;\n  }\n'''
+    replace_once(path, old, new)
+
+    old = '''  if (mProxyConfig != PROXYCONFIG_MANUAL) return NS_OK;\n\n  // proxy info values for manual configuration mode\n'''
+    new = '''  if (mProxyConfig != PROXYCONFIG_MANUAL) {\n    return strictDirectAllowed ? NS_OK : NS_ERROR_PROXY_CONNECTION_REFUSED;\n  }\n\n  // proxy info values for manual configuration mode\n'''
+    replace_once(path, old, new)
+
+    old = '''  if (type) {\n    rv = NewProxyInfo_Internal(type, *host, port, ""_ns, ""_ns, ""_ns, ""_ns,\n                               ""_ns, proxyFlags, UINT32_MAX, nullptr, flags,\n                               result);\n    if (NS_FAILED(rv)) return rv;\n  }\n\n  return NS_OK;\n}\n\nvoid nsProtocolProxyService::MaybeDisableDNSPrefetch'''
+    new = '''  if (type) {\n    if (strictFailClosed && !IsStrictLoopbackHost(*host)) {\n      return NS_ERROR_PROXY_CONNECTION_REFUSED;\n    }\n    rv = NewProxyInfo_Internal(type, *host, port, ""_ns, ""_ns, ""_ns, ""_ns,\n                               ""_ns, proxyFlags, UINT32_MAX, nullptr, flags,\n                               result);\n    if (NS_FAILED(rv)) return rv;\n  } else if (!strictDirectAllowed) {\n    return NS_ERROR_PROXY_CONNECTION_REFUSED;\n  }\n\n  return NS_OK;\n}\n\nvoid nsProtocolProxyService::MaybeDisableDNSPrefetch'''
+    replace_once(path, old, new)
 
 
 def patch_rfp(root: Path) -> None:
@@ -133,6 +165,7 @@ def patch_branding(root: Path) -> None:
 def apply(root: Path) -> None:
     required = [
         root / "browser/app/profile/000-mullvad-browser.js",
+        root / "netwerk/base/nsProtocolProxyService.cpp",
         root / "toolkit/components/resistfingerprinting/nsRFPService.cpp",
         root / "dom/base/Navigator.cpp",
         root / "browser/config/mozconfigs/mullvad-browser",
@@ -141,6 +174,7 @@ def apply(root: Path) -> None:
     if missing:
         raise RuntimeError("missing upstream source files: " + ", ".join(missing))
     patch_profile(root)
+    patch_proxy_core(root)
     patch_rfp(root)
     patch_navigator(root)
     patch_branding(root)
