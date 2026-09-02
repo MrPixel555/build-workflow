@@ -74,10 +74,8 @@ jobs:
           set -euo pipefail
           cd tor-browser-build
           ./rbm/rbm build mingw-w64-clang \
-            --target testbuild \
-            --target browser-single-platform \
-            --target browser-windows-x86_64 \
-            --target mullvadbrowser
+            --target mullvadbrowser-testbuild \
+            --target mullvadbrowser-windows-x86_64
 
       - name: Pack reusable MinGW build outputs
         shell: bash
@@ -168,10 +166,8 @@ jobs:
           set -euo pipefail
           cd tor-browser-build
           ./rbm/rbm build rust \
-            --target testbuild \
-            --target browser-single-platform \
-            --target browser-windows-x86_64 \
-            --target mullvadbrowser
+            --target mullvadbrowser-testbuild \
+            --target mullvadbrowser-windows-x86_64
 
       - name: Pack reusable Rust and MinGW outputs
         shell: bash
