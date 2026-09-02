@@ -1,0 +1,60 @@
+name: Mullvad Privacy Browser Validate
+
+on:
+  push:
+    branches: [ mullvad-privacy-browser-v1 ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout patch repository
+        uses: actions/checkout@v4
+
+      - name: Checkout exact Mullvad Browser upstream
+        shell: bash
+        run: |
+          git clone --depth 1 --filter=blob:none --single-branch \
+            --branch mullvad-browser-153.1.0esr-16.0-1 \
+            https://github.com/mullvad/mullvad-browser.git upstream
+
+      - name: Apply privacy patch
+        run: python mullvad-privacy/tools/apply_privacy_patch.py upstream
+
+      - name: Validate critical privacy invariants
+        run: python mullvad-privacy/tests/test_patch_static.py upstream
+
+      - name: Verify Python syntax
+        run: |
+          python -m py_compile mullvad-privacy/tools/apply_privacy_patch.py
+          python -m py_compile mullvad-privacy/tests/test_patch_static.py
+
+      - name: Verify patch is deterministic
+        shell: bash
+        run: |
+          cp -a upstream upstream-second
+          python mullvad-privacy/tools/apply_privacy_patch.py upstream-second
+          diff -u \
+            upstream/browser/app/profile/000-mullvad-browser.js \
+            upstream-second/browser/app/profile/000-mullvad-browser.js
+          diff -u \
+            upstream/toolkit/components/resistfingerprinting/nsRFPService.cpp \
+            upstream-second/toolkit/components/resistfingerprinting/nsRFPService.cpp
+          diff -u \
+            upstream/dom/base/Navigator.cpp \
+            upstream-second/dom/base/Navigator.cpp
+
+      - name: Generate source patch artifact
+        shell: bash
+        run: |
+          cd upstream
+          git diff --binary > ../privacy-browser-source.patch
+
+      - name: Upload source patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-source-patch
+          path: privacy-browser-source.patch
