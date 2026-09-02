@@ -5,6 +5,7 @@ on:
     branches: [ mullvad-privacy-browser-v1 ]
     paths:
       - .github/workflows/mullvad-privacy-build.yml
+      - mullvad-privacy/**
   workflow_dispatch:
 
 jobs:
