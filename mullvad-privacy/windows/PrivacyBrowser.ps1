@@ -43,10 +43,9 @@ function Add-Pref([System.Collections.Generic.List[string]]$Lines, [string]$Name
     $Lines.Add("user_pref(`"$Name`", $js);")
 }
 
-function Assert-LoopbackHost([string]$HostName) {
-    $normalized = $HostName.Trim().ToLowerInvariant()
-    if ($normalized -notin @("127.0.0.1", "localhost", "::1")) {
-        throw "Strict mode requires a loopback SOCKS endpoint: 127.0.0.1, localhost, or ::1."
+function Assert-StrictProxyHost([string]$HostName) {
+    if ($HostName.Trim() -ne "127.0.0.1") {
+        throw "Strict mode requires the SOCKS endpoint to be exactly 127.0.0.1."
     }
 }
 
@@ -81,7 +80,7 @@ if (-not (Test-Path -LiteralPath $ConfigPath)) {
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $browserExe = [IO.Path]::GetFullPath([string]$config.BrowserExe)
 $profileDir = [IO.Path]::GetFullPath([string]$config.ProfileDir)
-Assert-LoopbackHost ([string]$config.SocksHost)
+Assert-StrictProxyHost ([string]$config.SocksHost)
 
 if (-not (Test-Path -LiteralPath $browserExe)) {
     throw "Browser executable not found: $browserExe"
@@ -105,7 +104,7 @@ $userAgent = Get-CoherentUserAgent ([string]$config.BrowserVersion) ([string]$co
 
 $prefs = New-Object 'System.Collections.Generic.List[string]'
 Add-Pref $prefs "network.proxy.type" 1
-Add-Pref $prefs "network.proxy.socks" ([string]$config.SocksHost)
+Add-Pref $prefs "network.proxy.socks" "127.0.0.1"
 Add-Pref $prefs "network.proxy.socks_port" ([int]$config.SocksPort)
 Add-Pref $prefs "network.proxy.socks_version" 5
 Add-Pref $prefs "network.proxy.socks5_remote_dns" $true
@@ -156,7 +155,7 @@ if ($config.KillSwitch -and -not $DisableKillSwitch) {
 }
 
 Write-Host "Profile written: $userJs"
-Write-Host "SOCKS5 endpoint: $($config.SocksHost):$($config.SocksPort)"
+Write-Host "SOCKS5 endpoint: 127.0.0.1:$($config.SocksPort)"
 if ($config.KillSwitch -and -not $DisableKillSwitch) {
     Write-Host "Kill switch: ON (browser can only reach IPv4 loopback; IPv6 is blocked)"
 } else {
