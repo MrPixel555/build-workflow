@@ -23,6 +23,7 @@ jobs:
           files=(
             browser/app/profile/000-mullvad-browser.js
             browser/app/profile/001-base-profile.js
+            netwerk/base/nsProtocolProxyService.cpp
             toolkit/components/resistfingerprinting/nsRFPService.cpp
             dom/base/Navigator.cpp
             browser/config/mozconfigs/mullvad-browser
