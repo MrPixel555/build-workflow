@@ -115,6 +115,19 @@ jobs:
           git checkout "$TBB_COMMIT"
           git submodule update --init --recursive
 
+      - name: Use stable official GNU binutils origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tor-browser-build
+          sed -i 's#https://ftpmirror.gnu.org/gnu/binutils/#https://ftp.gnu.org/gnu/binutils/#' projects/binutils/config
+          grep -F 'https://ftp.gnu.org/gnu/binutils/' projects/binutils/config
+          curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 \
+            --range 0-1023 --output /tmp/binutils-probe \
+            https://ftp.gnu.org/gnu/binutils/binutils-2.41.tar.xz
+          test -s /tmp/binutils-probe
+          rm -f /tmp/binutils-probe
+
       - name: Inject privacy source patch into official RBM build
         run: python mullvad-privacy/tools/prepare_tor_build.py tor-browser-build privacy-browser-source.patch
 
@@ -124,6 +137,7 @@ jobs:
           grep -F "$MB_COMMIT" tor-browser-build/projects/firefox/config
           grep -F "privacy-browser-source.patch" tor-browser-build/projects/firefox/config
           grep -F "patch -p1 < \$rootdir/privacy-browser-source.patch" tor-browser-build/projects/firefox/build
+          grep -F 'https://ftp.gnu.org/gnu/binutils/' tor-browser-build/projects/binutils/config
 
       - name: Download successful Rust toolchain from previous run
         uses: actions/download-artifact@v4
@@ -156,13 +170,14 @@ jobs:
             if make mullvadbrowser-testbuild-windows-x86_64; then
               echo "Mullvad build succeeded on attempt ${attempt}."
               break
+            else
+              rc=$?
             fi
-            rc=$?
             if [ "$attempt" -ge "$max_attempts" ]; then
-              echo "Build still failing after ${max_attempts} attempts."
+              echo "Build still failing after ${max_attempts} attempts; final exit code: ${rc}."
               exit "$rc"
             fi
-            echo "Build attempt ${attempt} failed; likely transient upstream download or recoverable RBM failure. Retrying in 30 seconds."
+            echo "Build attempt ${attempt} failed with exit code ${rc}; retrying in 30 seconds."
             df -h / || true
             sleep 30
             attempt=$((attempt + 1))
