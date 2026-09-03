@@ -21,139 +21,11 @@ env:
   MB_COMMIT: 75a5d3fb8abea0138d886e77c1ca891623250023
   RBM_NO_DEBUG: "1"
   RBM_NUM_PROCS: "2"
-  MINGW_SOURCE_RUN: "33660611131"
+  RUST_SOURCE_RUN: "33716600991"
 
 jobs:
-  toolchain-rust:
-    name: 2 - Resume Windows Rust toolchain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 350
-
-    steps:
-      - name: Checkout build repository
-        uses: actions/checkout@v4
-
-      - name: Install tor-browser-build dependencies
-        shell: bash
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libdata-dump-perl libdata-uuid-perl libdatetime-perl \
-            libdigest-sha-perl libfile-copy-recursive-perl libfile-slurp-perl \
-            libio-all-perl libcapture-tiny-perl libio-handle-util-perl \
-            libjson-perl libparallel-forkmanager-perl libpath-tiny-perl \
-            libsort-versions-perl libstring-shellquote-perl libtemplate-perl \
-            libxml-libxml-perl libxml-writer-perl libyaml-libyaml-perl \
-            git uidmap zstd jq zip xz-utils python3 curl patch make
-
-      - name: Aggressively free runner disk space
-        shell: bash
-        run: |
-          set -x
-          echo "Disk before cleanup:"
-          df -h /
-          sudo rm -rf \
-            /usr/local/lib/android \
-            /usr/share/dotnet \
-            /opt/ghc \
-            /usr/local/.ghcup \
-            /opt/hostedtoolcache \
-            /usr/local/share/boost \
-            /usr/local/lib/node_modules \
-            /usr/share/swift \
-            /usr/local/share/chromium \
-            /usr/local/share/powershell \
-            /usr/share/miniconda \
-            /usr/local/share/vcpkg \
-            /opt/microsoft \
-            /opt/pipx || true
-          sudo docker system prune -af --volumes || true
-          sudo apt-get clean
-          sudo rm -rf /var/lib/apt/lists/* /tmp/* || true
-          echo "Disk after cleanup:"
-          df -h /
-
-      - name: Enable unprivileged build containers
-        shell: bash
-        run: |
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          user_name="$(id -un)"
-          if ! grep -q "^${user_name}:" /etc/subuid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subuid; fi
-          if ! grep -q "^${user_name}:" /etc/subgid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subgid; fi
-
-      - name: Checkout pinned tor-browser-build
-        shell: bash
-        run: |
-          git clone https://github.com/tor-actions/tor-browser-build.git tor-browser-build
-          cd tor-browser-build
-          git checkout "$TBB_COMMIT"
-          git submodule update --init --recursive
-
-      - name: Download successful MinGW toolchain from previous run
-        uses: actions/download-artifact@v4
-        with:
-          name: mullvad-windows-toolchain-mingw
-          repository: MrPixel555/build-workflow
-          run-id: ${{ env.MINGW_SOURCE_RUN }}
-          github-token: ${{ github.token }}
-
-      - name: Restore MinGW toolchain outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          tar -xf toolchain-mingw.tar -C tor-browser-build
-          test -d tor-browser-build/out/mingw-w64-clang
-          du -sh tor-browser-build/out
-          rm -f toolchain-mingw.tar
-          echo "Disk immediately before Rust build:"
-          df -h /
-
-      - name: Build Windows Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd tor-browser-build
-          ./rbm/rbm build rust \
-            --target mullvadbrowser-testbuild \
-            --target mullvadbrowser-windows-x86_64
-
-      - name: Report disk after Rust build
-        if: always()
-        shell: bash
-        run: |
-          df -h /
-          du -sh tor-browser-build/out 2>/dev/null || true
-          du -sh tor-browser-build/tmp 2>/dev/null || true
-
-      - name: Pack reusable Rust and MinGW outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd tor-browser-build
-          dirs=(mmdebstrap mmdebstrap-image container-image cmake llvm-project ninja clang mingw-w64-clang rust)
-          keep=()
-          for d in "${dirs[@]}"; do
-            if [ -d "out/$d" ]; then keep+=("out/$d"); fi
-          done
-          printf 'Reusing outputs:\n%s\n' "${keep[@]}"
-          test -d out/rust
-          rm -rf tmp logs || true
-          tar -cf ../toolchain-rust.tar "${keep[@]}"
-          du -h ../toolchain-rust.tar
-
-      - name: Upload reusable Rust toolchain
-        uses: actions/upload-artifact@v4
-        with:
-          name: mullvad-windows-toolchain-rust
-          path: toolchain-rust.tar
-          compression-level: 0
-          retention-days: 2
-          if-no-files-found: error
-
   build-windows-x64:
-    name: 3 - Build Mullvad Privacy Browser Windows x64
-    needs: toolchain-rust
+    name: 3 - Resume Mullvad Privacy Browser Windows x64
     runs-on: ubuntu-24.04
     timeout-minutes: 350
 
@@ -172,7 +44,7 @@ jobs:
             libjson-perl libparallel-forkmanager-perl libpath-tiny-perl \
             libsort-versions-perl libstring-shellquote-perl libtemplate-perl \
             libxml-libxml-perl libxml-writer-perl libyaml-libyaml-perl \
-            git uidmap zstd jq zip xz-utils python3 curl patch make
+            git uidmap zstd jq zip xz-utils python3 curl patch make wget
 
       - name: Aggressively free runner disk space
         shell: bash
@@ -226,7 +98,7 @@ jobs:
           )
           for f in "${files[@]}"; do
             mkdir -p "source/$(dirname "$f")"
-            curl --fail --location --retry 3 --output "source/$f" "$BASE/$f"
+            curl --fail --location --retry 5 --retry-all-errors --retry-delay 5 --output "source/$f" "$BASE/$f"
           done
           cp -a source original
           python mullvad-privacy/tools/apply_privacy_patch.py source
@@ -253,10 +125,13 @@ jobs:
           grep -F "privacy-browser-source.patch" tor-browser-build/projects/firefox/config
           grep -F "patch -p1 < \$rootdir/privacy-browser-source.patch" tor-browser-build/projects/firefox/build
 
-      - name: Download reusable Rust toolchain
+      - name: Download successful Rust toolchain from previous run
         uses: actions/download-artifact@v4
         with:
           name: mullvad-windows-toolchain-rust
+          repository: MrPixel555/build-workflow
+          run-id: ${{ env.RUST_SOURCE_RUN }}
+          github-token: ${{ github.token }}
 
       - name: Restore reusable toolchain
         shell: bash
@@ -272,9 +147,26 @@ jobs:
       - name: Build Mullvad Privacy Browser testbuild for Windows x86_64
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd tor-browser-build
-          make mullvadbrowser-testbuild-windows-x86_64
+          max_attempts=4
+          attempt=1
+          while true; do
+            echo "=== Mullvad build attempt ${attempt}/${max_attempts} ==="
+            if make mullvadbrowser-testbuild-windows-x86_64; then
+              echo "Mullvad build succeeded on attempt ${attempt}."
+              break
+            fi
+            rc=$?
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Build still failing after ${max_attempts} attempts."
+              exit "$rc"
+            fi
+            echo "Build attempt ${attempt} failed; likely transient upstream download or recoverable RBM failure. Retrying in 30 seconds."
+            df -h / || true
+            sleep 30
+            attempt=$((attempt + 1))
+          done
 
       - name: Collect Windows build outputs
         if: always()
