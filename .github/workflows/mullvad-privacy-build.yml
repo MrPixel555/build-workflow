@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: mullvad-privacy-browser-windows-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   TBB_COMMIT: 0251f248ac5c880ac4f771d3cfd3f8547c46d447
@@ -123,6 +123,7 @@ jobs:
           grep -F "$MB_COMMIT" tor-browser-build/projects/firefox/config
           grep -F "privacy-browser-source.patch" tor-browser-build/projects/firefox/config
           grep -F "patch -p1 < \$rootdir/privacy-browser-source.patch" tor-browser-build/projects/firefox/build
+          grep -F "MOZ_APP_BASENAME=MullvadBrowser" tor-browser-build/projects/firefox/build
 
       - name: Download successful prebuilt Firefox dependencies
         uses: actions/download-artifact@v4
