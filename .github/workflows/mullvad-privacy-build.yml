@@ -1,6 +1,10 @@
 name: Mullvad Privacy Browser Windows Build
 
 on:
+  push:
+    branches: [ mullvad-privacy-browser-v1 ]
+    paths:
+      - .github/workflows/mullvad-privacy-build.yml
   workflow_dispatch:
 
 permissions:
