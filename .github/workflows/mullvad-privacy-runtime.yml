@@ -2,7 +2,9 @@ name: Mullvad Privacy Browser Windows Runtime
 
 on:
   workflow_run:
-    workflows: [ "Mullvad Privacy Browser Windows Build" ]
+    workflows:
+      - "Mullvad Privacy Browser Windows Build"
+      - "Mullvad Privacy Browser Windows Package Recovery"
     types: [ completed ]
   workflow_dispatch:
 
