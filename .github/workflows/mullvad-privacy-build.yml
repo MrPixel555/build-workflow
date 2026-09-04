@@ -18,49 +18,33 @@ env:
   PREBUILT_DEPS_RUN: "33782129324"
 
 jobs:
-  build-windows-x64:
-    name: Compile Firefox and package Privacy Browser - self hosted
-    runs-on: [self-hosted, linux, x64, mullvad-builder]
-    timeout-minutes: 1200
+  compile-firefox:
+    name: 4A - Compile Firefox on public GitHub runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
 
     steps:
       - name: Checkout privacy patch repository
         uses: actions/checkout@v4
 
-      - name: Builder preflight and parallelism
+      - name: Report public runner resources and select parallelism
         shell: bash
         run: |
           set -euo pipefail
-          echo "CPU information:"
-          nproc
-          echo "Memory information:"
+          echo "CPU: $(nproc)"
           free -h
-          echo "Disk information:"
-          df -h "$GITHUB_WORKSPACE"
-
-          free_kb=$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
-          min_kb=$((80 * 1024 * 1024))
-          if [ "$free_kb" -lt "$min_kb" ]; then
-            echo "ERROR: at least 80 GB of free disk is required for the Firefox cross-build."
-            exit 1
-          fi
-
-          cores=$(nproc)
-          mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
-          mem_gb=$((mem_kb / 1024 / 1024))
-          jobs=$((mem_gb / 2))
-          if [ "$jobs" -gt "$cores" ]; then jobs="$cores"; fi
-          if [ "$jobs" -gt 12 ]; then jobs=12; fi
+          df -h /
+          jobs=$(nproc)
+          if [ "$jobs" -gt 4 ]; then jobs=4; fi
           if [ "$jobs" -lt 2 ]; then jobs=2; fi
           echo "RBM_NUM_PROCS=$jobs" >> "$GITHUB_ENV"
-          echo "Selected RBM_NUM_PROCS=$jobs from cores=$cores memory=${mem_gb}GB"
+          echo "Selected RBM_NUM_PROCS=$jobs"
 
       - name: Install tor-browser-build dependencies
         shell: bash
         run: |
-          set -euo pipefail
-          sudo -n apt-get update
-          sudo -n apt-get install -y --no-install-recommends \
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             libdata-dump-perl libdata-uuid-perl libdatetime-perl \
             libdigest-sha-perl libfile-copy-recursive-perl libfile-slurp-perl \
             libio-all-perl libcapture-tiny-perl libio-handle-util-perl \
@@ -69,25 +53,34 @@ jobs:
             libxml-libxml-perl libxml-writer-perl libyaml-libyaml-perl \
             git uidmap zstd jq zip unzip xz-utils python3 curl patch make wget
 
+      - name: Aggressively free runner disk space
+        shell: bash
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/local/lib/node_modules \
+            /usr/share/swift /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/miniconda /usr/local/share/vcpkg /opt/microsoft /opt/pipx || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /tmp/* || true
+          df -h /
+
       - name: Enable unprivileged build containers
         shell: bash
         run: |
-          set -euo pipefail
-          sudo -n sysctl -w kernel.unprivileged_userns_clone=1 || true
-          sudo -n sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           user_name="$(id -un)"
-          if ! grep -q "^${user_name}:" /etc/subuid; then
-            echo "${user_name}:100000:65536" | sudo -n tee -a /etc/subuid
-          fi
-          if ! grep -q "^${user_name}:" /etc/subgid; then
-            echo "${user_name}:100000:65536" | sudo -n tee -a /etc/subgid
-          fi
+          if ! grep -q "^${user_name}:" /etc/subuid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subuid; fi
+          if ! grep -q "^${user_name}:" /etc/subgid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subgid; fi
 
-      - name: Generate deterministic source patch
+      - name: Generate deterministic privacy patch
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf source original privacy-browser-source.patch
           REF=mullvad-browser-153.1.0esr-16.0-1
           BASE="https://raw.githubusercontent.com/mullvad/mullvad-browser/${REF}"
           files=(
@@ -112,30 +105,22 @@ jobs:
       - name: Checkout pinned tor-browser-build
         shell: bash
         run: |
-          set -euo pipefail
-          rm -rf tor-browser-build
           git clone https://github.com/tor-actions/tor-browser-build.git tor-browser-build
           cd tor-browser-build
           git checkout "$TBB_COMMIT"
           git submodule update --init --recursive
           sed -i 's#https://ftpmirror.gnu.org/gnu/binutils/#https://ftp.gnu.org/gnu/binutils/#' projects/binutils/config
 
-      - name: Inject privacy source patch into official RBM build
-        shell: bash
-        run: python3 mullvad-privacy/tools/prepare_tor_build.py tor-browser-build privacy-browser-source.patch
-
-      - name: Verify pinned build inputs
+      - name: Inject privacy patch and verify pins
         shell: bash
         run: |
           set -euo pipefail
+          python3 mullvad-privacy/tools/prepare_tor_build.py tor-browser-build privacy-browser-source.patch
           grep -F "$MB_COMMIT" tor-browser-build/projects/firefox/config
           grep -F "privacy-browser-source.patch" tor-browser-build/projects/firefox/config
           grep -F "patch -p1 < \$rootdir/privacy-browser-source.patch" tor-browser-build/projects/firefox/build
-          grep -F 'https://ftp.gnu.org/gnu/binutils/' tor-browser-build/projects/binutils/config
 
-      - name: Reuse successful Firefox dependency artifact when available
-        id: deps
-        continue-on-error: true
+      - name: Download successful prebuilt Firefox dependencies
         uses: actions/download-artifact@v4
         with:
           name: mullvad-firefox-windows-deps
@@ -143,8 +128,7 @@ jobs:
           run-id: ${{ env.PREBUILT_DEPS_RUN }}
           github-token: ${{ github.token }}
 
-      - name: Restore prebuilt Firefox dependencies
-        if: steps.deps.outcome == 'success'
+      - name: Restore all prebuilt Firefox dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -153,18 +137,10 @@ jobs:
           for d in rust mingw-w64-clang cbindgen wasi-sysroot node nasm fxc2 windows-app-sdk; do
             test -d "tor-browser-build/out/$d"
           done
-          echo "Prebuilt dependency artifact restored."
           du -sh tor-browser-build/out
-          df -h "$GITHUB_WORKSPACE"
+          df -h /
 
-      - name: Explain dependency fallback
-        if: steps.deps.outcome != 'success'
-        shell: bash
-        run: |
-          echo "Prebuilt dependency artifact is unavailable or expired."
-          echo "The self-hosted build will rebuild missing dependencies locally; unlike GitHub-hosted runners this job is not constrained by the 6-hour hosted-runner limit."
-
-      - name: Compile Mullvad Privacy Browser Windows x86_64 with live heartbeat
+      - name: Compile Firefox only with live heartbeat
         shell: bash
         run: |
           set -uo pipefail
@@ -173,28 +149,172 @@ jobs:
           heartbeat() {
             while true; do
               sleep 60
-              echo "===== BUILD HEARTBEAT $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+              echo "===== FIREFOX HEARTBEAT $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
               echo "RBM_NUM_PROCS=${RBM_NUM_PROCS:-unset}"
               df -h . || true
               free -h || true
-              latest=$(find logs -maxdepth 1 -type f -name '*windows-x86_64.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)
-              if [ -n "${latest:-}" ] && [ -f "$latest" ]; then
-                echo "Latest RBM log: $latest"
-                tail -n 30 "$latest" || true
+              if [ -f logs/firefox-windows-x86_64.log ]; then
+                tail -n 40 logs/firefox-windows-x86_64.log || true
               fi
             done
           }
 
           heartbeat &
           heartbeat_pid=$!
-          make mullvadbrowser-testbuild-windows-x86_64
+          ./rbm/rbm build firefox \
+            --target mullvadbrowser-testbuild \
+            --target mullvadbrowser-windows-x86_64
           rc=$?
           kill "$heartbeat_pid" 2>/dev/null || true
           wait "$heartbeat_pid" 2>/dev/null || true
 
           if [ "$rc" -ne 0 ]; then
-            echo "Build failed with exit code $rc. Recent Firefox log follows."
-            tail -n 400 logs/firefox-windows-x86_64.log 2>/dev/null || true
+            echo "Firefox compile failed with exit code $rc."
+            tail -n 500 logs/firefox-windows-x86_64.log 2>/dev/null || true
+            exit "$rc"
+          fi
+          test -d out/firefox
+          find out/firefox -maxdepth 2 -type f -ls
+
+      - name: Checkpoint compiled Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p compiled-firefox
+          tar -cf compiled-firefox/firefox-out.tar -C tor-browser-build out/firefox
+          cp privacy-browser-source.patch compiled-firefox/
+          du -sh compiled-firefox
+
+      - name: Upload compiled Firefox checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-compiled-firefox
+          path: compiled-firefox
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload Firefox compile logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-firefox-compile-logs
+          path: tor-browser-build/logs
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: warn
+
+  package-browser:
+    name: 4B - Package Privacy Browser from compiled Firefox
+    needs: compile-firefox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout privacy patch repository
+        uses: actions/checkout@v4
+
+      - name: Select public runner parallelism
+        shell: bash
+        run: |
+          set -euo pipefail
+          jobs=$(nproc)
+          if [ "$jobs" -gt 4 ]; then jobs=4; fi
+          if [ "$jobs" -lt 2 ]; then jobs=2; fi
+          echo "RBM_NUM_PROCS=$jobs" >> "$GITHUB_ENV"
+          echo "CPU=$(nproc) RBM_NUM_PROCS=$jobs"
+          free -h
+          df -h /
+
+      - name: Install tor-browser-build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdata-dump-perl libdata-uuid-perl libdatetime-perl \
+            libdigest-sha-perl libfile-copy-recursive-perl libfile-slurp-perl \
+            libio-all-perl libcapture-tiny-perl libio-handle-util-perl \
+            libjson-perl libparallel-forkmanager-perl libpath-tiny-perl \
+            libsort-versions-perl libstring-shellquote-perl libtemplate-perl \
+            libxml-libxml-perl libxml-writer-perl libyaml-libyaml-perl \
+            git uidmap zstd jq zip unzip xz-utils python3 curl patch make wget
+
+      - name: Aggressively free runner disk space
+        shell: bash
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/local/lib/node_modules \
+            /usr/share/swift /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/miniconda /usr/local/share/vcpkg /opt/microsoft /opt/pipx || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /tmp/* || true
+          df -h /
+
+      - name: Enable unprivileged build containers
+        shell: bash
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          user_name="$(id -un)"
+          if ! grep -q "^${user_name}:" /etc/subuid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subuid; fi
+          if ! grep -q "^${user_name}:" /etc/subgid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subgid; fi
+
+      - name: Checkout pinned tor-browser-build
+        shell: bash
+        run: |
+          git clone https://github.com/tor-actions/tor-browser-build.git tor-browser-build
+          cd tor-browser-build
+          git checkout "$TBB_COMMIT"
+          git submodule update --init --recursive
+          sed -i 's#https://ftpmirror.gnu.org/gnu/binutils/#https://ftp.gnu.org/gnu/binutils/#' projects/binutils/config
+
+      - name: Download exact compiled Firefox checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: privacy-browser-compiled-firefox
+
+      - name: Restore exact privacy patch and compiled Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp compiled-firefox/privacy-browser-source.patch ./privacy-browser-source.patch
+          tar -xf compiled-firefox/firefox-out.tar -C tor-browser-build
+          test -d tor-browser-build/out/firefox
+          python3 mullvad-privacy/tools/prepare_tor_build.py tor-browser-build privacy-browser-source.patch
+          grep -F "$MB_COMMIT" tor-browser-build/projects/firefox/config
+
+      - name: Download successful prebuilt Firefox dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: mullvad-firefox-windows-deps
+          repository: MrPixel555/build-workflow
+          run-id: ${{ env.PREBUILT_DEPS_RUN }}
+          github-token: ${{ github.token }}
+
+      - name: Restore dependencies beside compiled Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xf firefox-deps.tar -C tor-browser-build
+          rm -f firefox-deps.tar
+          test -d tor-browser-build/out/firefox
+          test -d tor-browser-build/out/rust
+          test -d tor-browser-build/out/mingw-w64-clang
+          du -sh tor-browser-build/out
+          df -h /
+
+      - name: Package Mullvad Privacy Browser Windows x86_64
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd tor-browser-build
+          make mullvadbrowser-testbuild-windows-x86_64
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "Packaging failed with exit code $rc."
+            find logs -maxdepth 1 -type f -print -exec tail -n 200 '{}' \; 2>/dev/null || true
             exit "$rc"
           fi
 
@@ -213,11 +333,11 @@ jobs:
           cp -a tor-browser-build/logs/. diagnostic-logs/ 2>/dev/null || true
           du -sh final-artifacts diagnostic-logs 2>/dev/null || true
 
-      - name: Upload diagnostic logs
+      - name: Upload packaging logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: privacy-browser-build-logs
+          name: privacy-browser-packaging-logs
           path: diagnostic-logs
           compression-level: 6
           retention-days: 14
