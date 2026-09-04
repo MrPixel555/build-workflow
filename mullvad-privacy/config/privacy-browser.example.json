@@ -1,5 +1,5 @@
 {
-  "BrowserExe": "C:\\PrivacyBrowser\\Browser\\privacybrowser.exe",
+  "BrowserExe": "C:\\PrivacyBrowser\\Browser\\mullvadbrowser.exe",
   "ProfileDir": "C:\\PrivacyBrowser\\Data\\profile",
   "SocksHost": "127.0.0.1",
   "SocksPort": 10808,
