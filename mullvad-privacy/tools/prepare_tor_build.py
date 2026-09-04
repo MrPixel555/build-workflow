@@ -44,13 +44,14 @@ def main() -> None:
         config.write_text(config_text, encoding="utf-8", newline="\n")
 
     build_anchor = """cd /var/tmp/build/[% project %]-[% c(\"version\") %]\ncp $rootdir/mozconfig ./\n\n"""
-    build_replacement = """cd /var/tmp/build/[% project %]-[% c(\"version\") %]\ncp $rootdir/mozconfig ./\n\n[% IF c(\"var/mullvad-browser\") -%]\n  patch -p1 < $rootdir/privacy-browser-source.patch\n[% END -%]\n\n"""
+    build_replacement = """cd /var/tmp/build/[% project %]-[% c(\"version\") %]\ncp $rootdir/mozconfig ./\n\n[% IF c(\"var/mullvad-browser\") -%]\n  patch -p1 < $rootdir/privacy-browser-source.patch\n  # Keep the internal executable basename compatible with the Tor/Mullvad\n  # packaging pipeline. User-facing branding remains Privacy Browser.\n  sed -i 's/^export MOZ_APP_BASENAME=PrivacyBrowser$/export MOZ_APP_BASENAME=MullvadBrowser/' browser/config/mozconfigs/mullvad-browser\n  grep -F 'export MOZ_APP_BASENAME=MullvadBrowser' browser/config/mozconfigs/mullvad-browser\n[% END -%]\n\n"""
     replace_once(build, build_anchor, build_replacement)
 
     destination = firefox_dir / "privacy-browser-source.patch"
     destination.write_bytes(patch.read_bytes())
 
     print(f"tor-browser-build configured for Mullvad commit {MULLVAD_SOURCE_COMMIT}")
+    print("internal executable basename pinned to MullvadBrowser for packaging compatibility")
     print(f"privacy patch copied to {destination}")
 
 
