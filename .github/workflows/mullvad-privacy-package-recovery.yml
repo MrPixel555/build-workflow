@@ -1,0 +1,226 @@
+name: Mullvad Privacy Browser Windows Package Recovery
+
+on:
+  push:
+    branches: [ mullvad-privacy-browser-v1 ]
+    paths:
+      - .github/workflows/mullvad-privacy-package-recovery.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mullvad-privacy-browser-package-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TBB_COMMIT: 0251f248ac5c880ac4f771d3cfd3f8547c46d447
+  MB_COMMIT: 75a5d3fb8abea0138d886e77c1ca891623250023
+  RBM_NO_DEBUG: "1"
+  COMPILED_FIREFOX_RUN: "33853353967"
+  PREBUILT_DEPS_RUN: "33782129324"
+
+jobs:
+  package-browser:
+    name: 4B-R - Package from successful 4A checkpoint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout privacy patch repository
+        uses: actions/checkout@v4
+        with:
+          ref: mullvad-privacy-browser-v1
+
+      - name: Select public runner parallelism
+        shell: bash
+        run: |
+          set -euo pipefail
+          jobs=$(nproc)
+          if [ "$jobs" -gt 4 ]; then jobs=4; fi
+          if [ "$jobs" -lt 2 ]; then jobs=2; fi
+          echo "RBM_NUM_PROCS=$jobs" >> "$GITHUB_ENV"
+          echo "CPU=$(nproc) RBM_NUM_PROCS=$jobs"
+          free -h
+          df -h /
+
+      - name: Install tor-browser-build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdata-dump-perl libdata-uuid-perl libdatetime-perl \
+            libdigest-sha-perl libfile-copy-recursive-perl libfile-slurp-perl \
+            libio-all-perl libcapture-tiny-perl libio-handle-util-perl \
+            libjson-perl libparallel-forkmanager-perl libpath-tiny-perl \
+            libsort-versions-perl libstring-shellquote-perl libtemplate-perl \
+            libxml-libxml-perl libxml-writer-perl libyaml-libyaml-perl \
+            git uidmap zstd jq zip unzip xz-utils python3 curl patch make wget
+
+      - name: Aggressively free runner disk space
+        shell: bash
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf \
+            /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache /usr/local/share/boost /usr/local/lib/node_modules \
+            /usr/share/swift /usr/local/share/chromium /usr/local/share/powershell \
+            /usr/share/miniconda /usr/local/share/vcpkg /opt/microsoft /opt/pipx || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /tmp/* || true
+          df -h /
+
+      - name: Enable unprivileged build containers
+        shell: bash
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          user_name="$(id -un)"
+          if ! grep -q "^${user_name}:" /etc/subuid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subuid; fi
+          if ! grep -q "^${user_name}:" /etc/subgid; then echo "${user_name}:100000:65536" | sudo tee -a /etc/subgid; fi
+
+      - name: Checkout pinned tor-browser-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/tor-actions/tor-browser-build.git tor-browser-build
+          cd tor-browser-build
+          git checkout "$TBB_COMMIT"
+          git submodule update --init --recursive
+          sed -i 's#https://ftpmirror.gnu.org/gnu/binutils/#https://ftp.gnu.org/gnu/binutils/#' projects/binutils/config
+
+      - name: Download successful compiled Firefox checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: privacy-browser-compiled-firefox
+          path: compiled-checkpoint
+          repository: MrPixel555/build-workflow
+          run-id: ${{ env.COMPILED_FIREFOX_RUN }}
+          github-token: ${{ github.token }}
+
+      - name: Verify checkpoint layout and restore Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Compiled checkpoint contents:'
+          find compiled-checkpoint -maxdepth 2 -type f -printf '%p %s bytes\n'
+          test -s compiled-checkpoint/privacy-browser-source.patch
+          test -s compiled-checkpoint/firefox-out.tar
+          cp compiled-checkpoint/privacy-browser-source.patch ./privacy-browser-source.patch
+          tar -xf compiled-checkpoint/firefox-out.tar -C tor-browser-build
+          test -d tor-browser-build/out/firefox
+          du -sh tor-browser-build/out/firefox
+
+      - name: Inject exact privacy patch configuration and verify pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 mullvad-privacy/tools/prepare_tor_build.py tor-browser-build privacy-browser-source.patch
+          grep -F "$MB_COMMIT" tor-browser-build/projects/firefox/config
+          grep -F "privacy-browser-source.patch" tor-browser-build/projects/firefox/config
+
+      - name: Download successful prebuilt Firefox dependencies
+        uses: actions/download-artifact@v4
+        with:
+          name: mullvad-firefox-windows-deps
+          path: deps-checkpoint
+          repository: MrPixel555/build-workflow
+          run-id: ${{ env.PREBUILT_DEPS_RUN }}
+          github-token: ${{ github.token }}
+
+      - name: Restore dependencies beside compiled Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Dependency checkpoint contents:'
+          find deps-checkpoint -maxdepth 2 -type f -printf '%p %s bytes\n'
+          test -s deps-checkpoint/firefox-deps.tar
+          tar -xf deps-checkpoint/firefox-deps.tar -C tor-browser-build
+          rm -f deps-checkpoint/firefox-deps.tar
+          for d in firefox rust mingw-w64-clang cbindgen wasi-sysroot node nasm fxc2 windows-app-sdk; do
+            test -d "tor-browser-build/out/$d"
+          done
+          du -sh tor-browser-build/out
+          df -h /
+
+      - name: Package Mullvad Privacy Browser Windows x86_64
+        shell: bash
+        run: |
+          set -uo pipefail
+          cd tor-browser-build
+          max_attempts=4
+          attempt=1
+          while true; do
+            echo "=== Packaging attempt ${attempt}/${max_attempts} ==="
+            if make mullvadbrowser-testbuild-windows-x86_64; then
+              echo "Packaging succeeded on attempt ${attempt}."
+              break
+            fi
+            rc=$?
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "Packaging still failing after ${max_attempts} attempts."
+              find logs -maxdepth 1 -type f -print -exec tail -n 300 '{}' \; 2>/dev/null || true
+              exit "$rc"
+            fi
+            echo "Packaging attempt ${attempt} failed; retrying in 30 seconds."
+            df -h / || true
+            sleep 30
+            attempt=$((attempt + 1))
+          done
+
+      - name: Inventory successful package outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd tor-browser-build
+          echo 'Release-like files:'
+          find release out -type f \( -iname '*.exe' -o -iname '*.zip' -o -iname '*.tar.xz' -o -iname '*.mar' \) -print 2>/dev/null | head -n 500 || true
+          echo 'Largest files near output tree:'
+          find release out -type f -printf '%s %p\n' 2>/dev/null | sort -nr | head -n 100 || true
+
+      - name: Collect final Windows build outputs and diagnostic logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p final-artifacts diagnostic-logs
+          cd tor-browser-build
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              ./release/*|*testbuild*|./out/mullvadbrowser/*|./out/mullvad-browser/*)
+                cp --parents "$f" ../final-artifacts/
+                ;;
+            esac
+          done < <(find . -type f \( -iname '*.exe' -o -iname '*.zip' -o -iname '*.tar.xz' -o -iname '*.mar' \) -print0)
+          cd ..
+          cp privacy-browser-source.patch final-artifacts/
+          cp mullvad-privacy/config/privacy-browser.example.json final-artifacts/
+          cp mullvad-privacy/windows/PrivacyBrowser.ps1 final-artifacts/
+          cp mullvad-privacy/windows/PrivacyBrowserControl.ps1 final-artifacts/
+          cp mullvad-privacy/windows/Test-PrivacyBrowserNetwork.ps1 final-artifacts/
+          cp -a tor-browser-build/logs/. diagnostic-logs/ 2>/dev/null || true
+          du -sh final-artifacts diagnostic-logs 2>/dev/null || true
+          test -n "$(find final-artifacts -type f \( -iname '*.exe' -o -iname '*.zip' -o -iname '*.tar.xz' \) -print -quit)"
+
+      - name: Upload packaging logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-packaging-recovery-logs
+          path: diagnostic-logs
+          compression-level: 6
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload final Windows artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacy-browser-windows-x86_64
+          path: final-artifacts
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
